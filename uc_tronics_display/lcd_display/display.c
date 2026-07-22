@@ -1,5 +1,10 @@
 /******
  * Static Home Assistant logo display for the UCTRONICS RM0004 160x80 LCD.
+ *
+ * This version intentionally avoids lcd_draw_image(). Some RM0004 controller
+ * revisions do not reliably accept a complete 25.6 KB frame in one operation.
+ * Instead, it renders the logo as short horizontal rectangles using the same
+ * drawing path as the original CPU/RAM/temperature screens.
  ******/
 #include <stdint.h>
 #include <stdlib.h>
@@ -9,20 +14,16 @@
 #define LCD_WIDTH 160
 #define LCD_HEIGHT 80
 
-static uint8_t framebuffer[LCD_WIDTH * LCD_HEIGHT * 2];
+static uint16_t canvas[LCD_WIDTH * LCD_HEIGHT];
 
 static void set_pixel(int x, int y, uint16_t color)
 {
-    size_t offset;
-
     if (x < 0 || x >= LCD_WIDTH || y < 0 || y >= LCD_HEIGHT)
     {
         return;
     }
 
-    offset = (size_t)(y * LCD_WIDTH + x) * 2;
-    framebuffer[offset] = (uint8_t)(color >> 8);
-    framebuffer[offset + 1] = (uint8_t)(color & 0xFF);
+    canvas[(y * LCD_WIDTH) + x] = color;
 }
 
 static void fill_circle(int center_x, int center_y, int radius, uint16_t color)
@@ -34,7 +35,7 @@ static void fill_circle(int center_x, int center_y, int radius, uint16_t color)
     {
         for (x = -radius; x <= radius; x++)
         {
-            if ((x * x) + (y * y) <= radius * radius)
+            if ((x * x) + (y * y) <= (radius * radius))
             {
                 set_pixel(center_x + x, center_y + y, color);
             }
@@ -80,41 +81,83 @@ static void draw_thick_line(
     }
 }
 
-static void draw_home_assistant_logo(void)
+static void build_home_assistant_logo(void)
 {
     const uint16_t blue = ST7735_COLOR565(24, 188, 242);
     const uint16_t white = ST7735_WHITE;
-    size_t index;
+    int index;
 
-    /* Clear the complete 160x80 framebuffer to black. */
-    for (index = 0; index < sizeof(framebuffer); index += 2)
+    for (index = 0; index < LCD_WIDTH * LCD_HEIGHT; index++)
     {
-        framebuffer[index] = 0;
-        framebuffer[index + 1] = 0;
+        canvas[index] = ST7735_BLACK;
     }
 
-    /* Home Assistant house outline. */
-    draw_thick_line(51, 36, 80, 8, 4, blue);
-    draw_thick_line(80, 8, 109, 36, 4, blue);
-    draw_thick_line(51, 36, 51, 60, 4, blue);
-    draw_thick_line(109, 36, 109, 60, 4, blue);
-    draw_thick_line(51, 60, 70, 72, 4, blue);
-    draw_thick_line(109, 60, 90, 72, 4, blue);
+    /*
+     * Centered Home Assistant house mark.
+     * The outline occupies roughly 64x72 pixels on the 160x80 screen.
+     */
+    draw_thick_line(51, 36, 80, 7, 4, blue);
+    draw_thick_line(80, 7, 109, 36, 4, blue);
+    draw_thick_line(51, 36, 51, 59, 4, blue);
+    draw_thick_line(109, 36, 109, 59, 4, blue);
+    draw_thick_line(51, 59, 70, 72, 4, blue);
+    draw_thick_line(109, 59, 90, 72, 4, blue);
 
-    /* Connected smart-home nodes. */
-    draw_thick_line(80, 27, 80, 57, 2, white);
+    /* Connected smart-home nodes inside the house. */
+    draw_thick_line(80, 26, 80, 56, 2, white);
     draw_thick_line(80, 38, 65, 46, 2, white);
     draw_thick_line(80, 38, 95, 46, 2, white);
-    draw_thick_line(80, 53, 71, 62, 2, white);
-    draw_thick_line(80, 53, 89, 62, 2, white);
+    draw_thick_line(80, 52, 71, 62, 2, white);
+    draw_thick_line(80, 52, 89, 62, 2, white);
 
-    fill_circle(80, 27, 4, white);
+    fill_circle(80, 26, 4, white);
     fill_circle(65, 46, 4, white);
     fill_circle(95, 46, 4, white);
     fill_circle(71, 62, 4, white);
     fill_circle(89, 62, 4, white);
+}
 
-    lcd_draw_image(0, 0, LCD_WIDTH, LCD_HEIGHT, framebuffer);
+static void render_canvas(void)
+{
+    int y;
+
+    /*
+     * Render each row as runs of identical colors. This keeps I2C writes small
+     * and uses lcd_fill_rectangle(), which is known to work on the RM0004.
+     */
+    for (y = 0; y < LCD_HEIGHT; y++)
+    {
+        int x = 0;
+
+        while (x < LCD_WIDTH)
+        {
+            uint16_t color = canvas[(y * LCD_WIDTH) + x];
+            int start = x;
+
+            while (
+                x < LCD_WIDTH &&
+                canvas[(y * LCD_WIDTH) + x] == color
+            )
+            {
+                x++;
+            }
+
+            /*
+             * The screen was already cleared to black, so skip black runs and
+             * draw only the blue and white portions of the logo.
+             */
+            if (color != ST7735_BLACK)
+            {
+                lcd_fill_rectangle(
+                    (uint16_t)start,
+                    (uint16_t)y,
+                    (uint16_t)(x - start),
+                    1,
+                    color
+                );
+            }
+        }
+    }
 }
 
 int main(void)
@@ -125,11 +168,14 @@ int main(void)
     }
 
     sleep(1);
-    draw_home_assistant_logo();
+
+    lcd_fill_screen(ST7735_BLACK);
+    build_home_assistant_logo();
+    render_canvas();
 
     /*
-     * Keep the add-on alive without redrawing the LCD or rotating through
-     * IP, CPU, RAM, temperature, and disk status screens.
+     * Keep the add-on alive without rotating through IP, CPU, RAM,
+     * temperature, or disk status screens.
      */
     while (1)
     {
