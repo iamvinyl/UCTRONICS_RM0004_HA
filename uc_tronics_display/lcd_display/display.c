@@ -1,9 +1,8 @@
 /******
  * Configurable display for the UCTRONICS RM0013 Raspberry Pi 5 rack.
  *
- * The RM0013 panel is treated as a 128x64 monochrome display. The underlying
- * UCTRONICS I2C bridge and existing st7735 driver are retained because the
- * stock RM0013 documentation points to the SKU_RM0004 software.
+ * The RM0013 uses the UCTRONICS RM0004 display software and its full-color
+ * ST7735 160x80 LCD geometry.
  ******/
 #include <stdint.h>
 #include <stdio.h>
@@ -13,8 +12,12 @@
 
 #include "st7735.h"
 
-#define DISPLAY_WIDTH 128
-#define DISPLAY_HEIGHT 64
+#define DISPLAY_WIDTH 160
+#define DISPLAY_HEIGHT 80
+#define LOGO_WIDTH 64
+#define LOGO_HEIGHT 64
+#define LOGO_X ((DISPLAY_WIDTH - LOGO_WIDTH) / 2)
+#define LOGO_Y ((DISPLAY_HEIGHT - LOGO_HEIGHT) / 2)
 #define MAX_SCREENS 5
 #define DEFAULT_SCREEN_DURATION 5
 #define MIN_SCREEN_DURATION 2
@@ -36,8 +39,8 @@ static unsigned int screen_duration = DEFAULT_SCREEN_DURATION;
 static char host_ip_address[64] = "Unavailable";
 static uint8_t host_disk_usage = 0;
 
-/* Monochrome canvas used to render the Home Assistant logo. */
-static uint8_t logo_canvas[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+/* RGB565 byte buffer used for one exact 64x64 logo transfer. */
+static uint8_t logo_image[LOGO_WIDTH * LOGO_HEIGHT * 2];
 
 static void sync_display(void)
 {
@@ -56,9 +59,9 @@ static void fill_rectangle_synced(
     sync_display();
 }
 
-static void clear_display(void)
+static void clear_display(uint16_t color)
 {
-    lcd_fill_screen(ST7735_BLACK);
+    lcd_fill_screen(color);
     sync_display();
 }
 
@@ -89,26 +92,32 @@ static uint16_t centered_x(const char *text, uint16_t character_width)
     return (uint16_t)((DISPLAY_WIDTH - pixel_width) / 2);
 }
 
-static void draw_title(const char *title)
+static void draw_title(const char *title, uint16_t accent_color)
 {
     lcd_write_string(
-        centered_x(title, Font_7x10.width),
+        centered_x(title, Font_8x16.width),
         1,
         (char *)title,
-        Font_7x10,
+        Font_8x16,
         ST7735_WHITE,
         ST7735_BLACK
     );
 
-    fill_rectangle_synced(0, 13, DISPLAY_WIDTH, 2, ST7735_WHITE);
+    fill_rectangle_synced(
+        0,
+        20,
+        DISPLAY_WIDTH,
+        3,
+        accent_color
+    );
 }
 
-static void draw_progress_bar(uint8_t percentage)
+static void draw_progress_bar(uint8_t percentage, uint16_t accent_color)
 {
-    const uint16_t start_x = 10;
-    const uint16_t start_y = 52;
-    const uint16_t segment_width = 8;
-    const uint16_t segment_height = 8;
+    const uint16_t start_x = 15;
+    const uint16_t start_y = 65;
+    const uint16_t segment_width = 10;
+    const uint16_t segment_height = 10;
     const uint16_t gap = 3;
     uint8_t filled_segments;
     uint8_t index;
@@ -133,45 +142,26 @@ static void draw_progress_bar(uint8_t percentage)
                 start_y,
                 segment_width,
                 segment_height,
-                ST7735_WHITE
+                accent_color
             );
         }
         else
         {
-            /* Draw an outline for unused segments. */
             fill_rectangle_synced(
                 x,
                 start_y,
                 segment_width,
-                1,
-                ST7735_WHITE
-            );
-            fill_rectangle_synced(
-                x,
-                start_y + segment_height - 1,
-                segment_width,
-                1,
-                ST7735_WHITE
-            );
-            fill_rectangle_synced(
-                x,
-                start_y,
-                1,
                 segment_height,
-                ST7735_WHITE
-            );
-            fill_rectangle_synced(
-                x + segment_width - 1,
-                start_y,
-                1,
-                segment_height,
-                ST7735_WHITE
+                ST7735_GRAY
             );
         }
     }
 }
 
-static void draw_percentage_value(uint8_t percentage)
+static void draw_percentage_value(
+    uint8_t percentage,
+    uint16_t accent_color
+)
 {
     char value[8];
 
@@ -184,27 +174,36 @@ static void draw_percentage_value(uint8_t percentage)
 
     lcd_write_string(
         centered_x(value, Font_16x26.width),
-        20,
+        30,
         value,
         Font_16x26,
         ST7735_WHITE,
         ST7735_BLACK
     );
 
-    draw_progress_bar(percentage);
+    draw_progress_bar(percentage, accent_color);
 }
 
-static void logo_set_pixel(int x, int y)
+static void logo_set_pixel(int x, int y, uint16_t color)
 {
-    if (x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT)
+    size_t offset;
+
+    if (x < 0 || x >= LOGO_WIDTH || y < 0 || y >= LOGO_HEIGHT)
     {
         return;
     }
 
-    logo_canvas[(y * DISPLAY_WIDTH) + x] = 1;
+    offset = (size_t)((y * LOGO_WIDTH) + x) * 2;
+    logo_image[offset] = (uint8_t)(color >> 8);
+    logo_image[offset + 1] = (uint8_t)(color & 0xFF);
 }
 
-static void logo_fill_circle(int center_x, int center_y, int radius)
+static void logo_fill_circle(
+    int center_x,
+    int center_y,
+    int radius,
+    uint16_t color
+)
 {
     int x;
     int y;
@@ -215,7 +214,7 @@ static void logo_fill_circle(int center_x, int center_y, int radius)
         {
             if ((x * x) + (y * y) <= (radius * radius))
             {
-                logo_set_pixel(center_x + x, center_y + y);
+                logo_set_pixel(center_x + x, center_y + y, color);
             }
         }
     }
@@ -226,7 +225,8 @@ static void logo_draw_thick_line(
     int y0,
     int x1,
     int y1,
-    int radius
+    int radius,
+    uint16_t color
 )
 {
     int dx = abs(x1 - x0);
@@ -237,7 +237,7 @@ static void logo_draw_thick_line(
 
     while (1)
     {
-        logo_fill_circle(x0, y0, radius);
+        logo_fill_circle(x0, y0, radius, color);
 
         if (x0 == x1 && y0 == y1)
         {
@@ -260,97 +260,115 @@ static void logo_draw_thick_line(
 
 static void build_home_assistant_logo(void)
 {
-    memset(logo_canvas, 0, sizeof(logo_canvas));
+    const uint16_t ha_blue = ST7735_COLOR565(24, 188, 242);
+    const uint16_t white = ST7735_WHITE;
+
+    memset(logo_image, 0, sizeof(logo_image));
 
     /*
-     * White-only Home Assistant mark for the RM0013 monochrome panel.
-     * The mark is centered inside the 128x64 visible area.
+     * Blue-and-white Home Assistant mark built inside a true 64x64 RGB565
+     * image. All coordinates are local to the image, not the LCD.
      */
-    logo_draw_thick_line(40, 29, 64, 5, 3);
-    logo_draw_thick_line(64, 5, 88, 29, 3);
-    logo_draw_thick_line(40, 29, 40, 45, 3);
-    logo_draw_thick_line(88, 29, 88, 45, 3);
-    logo_draw_thick_line(40, 45, 55, 59, 3);
-    logo_draw_thick_line(88, 45, 73, 59, 3);
+    logo_draw_thick_line(4, 29, 32, 2, 4, ha_blue);
+    logo_draw_thick_line(32, 2, 60, 29, 4, ha_blue);
+    logo_draw_thick_line(4, 29, 4, 47, 4, ha_blue);
+    logo_draw_thick_line(60, 29, 60, 47, 4, ha_blue);
+    logo_draw_thick_line(4, 47, 22, 61, 4, ha_blue);
+    logo_draw_thick_line(60, 47, 42, 61, 4, ha_blue);
 
-    /* Connected nodes inside the house. */
-    logo_draw_thick_line(64, 20, 64, 45, 1);
-    logo_draw_thick_line(64, 30, 52, 38, 1);
-    logo_draw_thick_line(64, 30, 76, 38, 1);
-    logo_draw_thick_line(64, 43, 57, 51, 1);
-    logo_draw_thick_line(64, 43, 71, 51, 1);
+    logo_draw_thick_line(32, 18, 32, 46, 2, white);
+    logo_draw_thick_line(32, 30, 18, 38, 2, white);
+    logo_draw_thick_line(32, 30, 46, 38, 2, white);
+    logo_draw_thick_line(32, 44, 24, 53, 2, white);
+    logo_draw_thick_line(32, 44, 40, 53, 2, white);
 
-    logo_fill_circle(64, 20, 3);
-    logo_fill_circle(52, 38, 3);
-    logo_fill_circle(76, 38, 3);
-    logo_fill_circle(57, 51, 3);
-    logo_fill_circle(71, 51, 3);
+    logo_fill_circle(32, 18, 4, white);
+    logo_fill_circle(18, 38, 4, white);
+    logo_fill_circle(46, 38, 4, white);
+    logo_fill_circle(24, 53, 4, white);
+    logo_fill_circle(40, 53, 4, white);
+}
+
+/*
+ * The stock lcd_draw_image() uses:
+ *
+ *     (height - y) * (width - x)
+ *
+ * for the transfer size. That is incorrect for any image not drawn at 0,0.
+ * This local replacement always sends exactly width * height RGB565 pixels.
+ */
+static void draw_image_exact(
+    uint16_t x,
+    uint16_t y,
+    uint16_t width,
+    uint16_t height,
+    uint8_t *data
+)
+{
+    uint32_t byte_count;
+
+    if (
+        x >= DISPLAY_WIDTH ||
+        y >= DISPLAY_HEIGHT ||
+        width == 0 ||
+        height == 0 ||
+        x + width > DISPLAY_WIDTH ||
+        y + height > DISPLAY_HEIGHT
+    )
+    {
+        fprintf(stderr, "Logo image dimensions are outside the LCD area.\n");
+        return;
+    }
+
+    byte_count = (uint32_t)width * (uint32_t)height * 2U;
+
+    lcd_set_address_window(
+        (uint8_t)x,
+        (uint8_t)y,
+        (uint8_t)(x + width - 1),
+        (uint8_t)(y + height - 1)
+    );
+
+    i2c_burst_transfer(data, byte_count);
+    sync_display();
 }
 
 static void render_home_assistant_logo(void)
 {
-    int y;
-
-    clear_display();
+    clear_display(ST7735_BLACK);
     build_home_assistant_logo();
 
-    /*
-     * Render each white run as a short rectangle and explicitly synchronize
-     * after each run. The missing synchronization was the reason the prior
-     * custom logo could leave the screen black.
-     */
-    for (y = 0; y < DISPLAY_HEIGHT; y++)
-    {
-        int x = 0;
+    printf(
+        "Drawing %ux%u RGB565 logo at %u,%u (%u bytes)\n",
+        (unsigned int)LOGO_WIDTH,
+        (unsigned int)LOGO_HEIGHT,
+        (unsigned int)LOGO_X,
+        (unsigned int)LOGO_Y,
+        (unsigned int)sizeof(logo_image)
+    );
+    fflush(stdout);
 
-        while (x < DISPLAY_WIDTH)
-        {
-            int start;
-
-            while (
-                x < DISPLAY_WIDTH &&
-                logo_canvas[(y * DISPLAY_WIDTH) + x] == 0
-            )
-            {
-                x++;
-            }
-
-            start = x;
-
-            while (
-                x < DISPLAY_WIDTH &&
-                logo_canvas[(y * DISPLAY_WIDTH) + x] != 0
-            )
-            {
-                x++;
-            }
-
-            if (x > start)
-            {
-                fill_rectangle_synced(
-                    (uint16_t)start,
-                    (uint16_t)y,
-                    (uint16_t)(x - start),
-                    1,
-                    ST7735_WHITE
-                );
-            }
-        }
-    }
-
-    sync_display();
+    draw_image_exact(
+        LOGO_X,
+        LOGO_Y,
+        LOGO_WIDTH,
+        LOGO_HEIGHT,
+        logo_image
+    );
 }
 
 static void render_ip_address(void)
 {
-    clear_display();
-    draw_title("HOST IP");
+    const uint16_t accent = ST7735_CYAN;
+
+    clear_display(ST7735_BLACK);
+    draw_title("HOST IP", accent);
 
     lcd_write_string(
-        centered_x(host_ip_address, Font_8x16.width),
-        27,
+        centered_x(host_ip_address, Font_11x18.width),
+        35,
         host_ip_address,
-        Font_8x16,
+        Font_11x18,
         ST7735_WHITE,
         ST7735_BLACK
     );
@@ -412,10 +430,6 @@ static int read_cpu_snapshot(
         return 0;
     }
 
-    /*
-     * guest and guest_nice are already included in user and nice, so they are
-     * not added separately.
-     */
     *idle_total = idle + iowait;
     *total = user + nice + system + idle + iowait + irq + softirq + steal;
 
@@ -484,23 +498,17 @@ static uint8_t read_ram_usage(void)
 
     while (fgets(line, sizeof(line), file) != NULL)
     {
-        if (
-            sscanf(line, "MemTotal: %llu kB", &memory_total) == 1
-        )
+        if (sscanf(line, "MemTotal: %llu kB", &memory_total) == 1)
         {
             continue;
         }
 
-        if (
-            sscanf(line, "MemAvailable: %llu kB", &memory_available) == 1
-        )
+        if (sscanf(line, "MemAvailable: %llu kB", &memory_available) == 1)
         {
             continue;
         }
 
-        if (
-            sscanf(line, "MemFree: %llu kB", &memory_free) == 1
-        )
+        if (sscanf(line, "MemFree: %llu kB", &memory_free) == 1)
         {
             continue;
         }
@@ -535,25 +543,31 @@ static uint8_t read_ram_usage(void)
 
 static void render_cpu_usage(void)
 {
-    clear_display();
-    draw_title("CPU USAGE");
-    draw_percentage_value(read_cpu_usage());
+    const uint16_t accent = ST7735_GREEN;
+
+    clear_display(ST7735_BLACK);
+    draw_title("CPU USAGE", accent);
+    draw_percentage_value(read_cpu_usage(), accent);
     sync_display();
 }
 
 static void render_ram_usage(void)
 {
-    clear_display();
-    draw_title("RAM USAGE");
-    draw_percentage_value(read_ram_usage());
+    const uint16_t accent = ST7735_YELLOW;
+
+    clear_display(ST7735_BLACK);
+    draw_title("RAM USAGE", accent);
+    draw_percentage_value(read_ram_usage(), accent);
     sync_display();
 }
 
 static void render_disk_space(void)
 {
-    clear_display();
-    draw_title("DISK SPACE");
-    draw_percentage_value(host_disk_usage);
+    const uint16_t accent = ST7735_BLUE;
+
+    clear_display(ST7735_BLACK);
+    draw_title("DISK SPACE", accent);
+    draw_percentage_value(host_disk_usage, accent);
     sync_display();
 }
 
