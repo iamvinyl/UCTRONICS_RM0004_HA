@@ -1,7 +1,7 @@
-name: "UCTronics Display"
-description: "Configurable UCTronics LCD Display"
+name: "UCTronics RM0013 Display"
+description: "Configurable 128x64 display for the UCTronics RM0013 Raspberry Pi 5 rack"
 url: "https://github.com/iamvinyl/UCTRONICS_RM0004_HA/tree/main/uc_tronics_display"
-version: "1.2.0"
+version: "1.2.1"
 slug: "uc_tronics_display"
 init: false
 arch:
