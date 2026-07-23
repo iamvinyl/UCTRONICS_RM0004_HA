@@ -1,19 +1,19 @@
 configuration:
   show_home_assistant_logo:
     name: Home Assistant logo
-    description: Show a monochrome Home Assistant logo sized for the RM0013 128x64 panel.
+    description: Show the blue-and-white Home Assistant logo on the full-color LCD.
   show_ip_address:
     name: Host IP address
     description: Show the primary Home Assistant host IPv4 address reported by Supervisor.
   show_cpu_usage:
     name: CPU usage
-    description: Show current system CPU usage calculated from /proc/stat.
+    description: Show current CPU usage with a green progress bar.
   show_ram_usage:
     name: RAM usage
-    description: Show current RAM usage calculated with MemAvailable.
+    description: Show current RAM usage with a yellow progress bar.
   show_disk_space:
     name: Host disk space
-    description: Show Home Assistant host data-disk usage reported by Supervisor.
+    description: Show Home Assistant host disk usage with a blue progress bar.
   screen_duration:
     name: Screen duration
     description: Number of seconds each enabled screen remains visible.
