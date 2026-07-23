@@ -270,35 +270,112 @@ static void logo_draw_thick_line(
     }
 }
 
+static void logo_fill_polygon(
+    const int *x_points,
+    const int *y_points,
+    int point_count,
+    uint16_t color
+)
+{
+    int intersections[16];
+    int y;
+    int index;
+
+    for (y = 0; y < LOGO_HEIGHT; y++)
+    {
+        int intersection_count = 0;
+        int previous = point_count - 1;
+
+        for (index = 0; index < point_count; index++)
+        {
+            int y1 = y_points[index];
+            int y2 = y_points[previous];
+
+            if (
+                (y1 < y && y2 >= y) ||
+                (y2 < y && y1 >= y)
+            )
+            {
+                intersections[intersection_count++] =
+                    x_points[index] +
+                    ((y - y1) * (x_points[previous] - x_points[index])) /
+                    (y2 - y1);
+            }
+
+            previous = index;
+        }
+
+        for (index = 0; index < intersection_count - 1; index++)
+        {
+            int sort_index;
+
+            for (
+                sort_index = index + 1;
+                sort_index < intersection_count;
+                sort_index++
+            )
+            {
+                if (intersections[sort_index] < intersections[index])
+                {
+                    int temporary = intersections[index];
+
+                    intersections[index] = intersections[sort_index];
+                    intersections[sort_index] = temporary;
+                }
+            }
+        }
+
+        for (index = 0; index + 1 < intersection_count; index += 2)
+        {
+            int x;
+
+            for (
+                x = intersections[index];
+                x <= intersections[index + 1];
+                x++
+            )
+            {
+                logo_set_pixel(x, y, color);
+            }
+        }
+    }
+}
+
 static void build_home_assistant_logo(void)
 {
     const uint16_t ha_blue = ST7735_COLOR565(24, 188, 242);
     const uint16_t white = ST7735_WHITE;
+    const int house_x[] =
+    {
+        32, 62, 62, 61, 59, 56, 52,
+        12, 8, 5, 3, 2, 2
+    };
+    const int house_y[] =
+    {
+        2, 30, 52, 56, 59, 61, 62,
+        62, 61, 59, 56, 52, 30
+    };
 
     memset(logo_image, 0, sizeof(logo_image));
 
     /*
-     * Blue-and-white Home Assistant mark built inside a true 64x64 RGB565
-     * image. All coordinates are local to the image, not the LCD.
+     * Filled Home Assistant house mark based on the current logo:
+     * cyan house body with rounded lower corners and a white three-node tree.
      */
-    logo_draw_thick_line(4, 29, 32, 2, 4, ha_blue);
-    logo_draw_thick_line(32, 2, 60, 29, 4, ha_blue);
-    logo_draw_thick_line(4, 29, 4, 47, 4, ha_blue);
-    logo_draw_thick_line(60, 29, 60, 47, 4, ha_blue);
-    logo_draw_thick_line(4, 47, 22, 61, 4, ha_blue);
-    logo_draw_thick_line(60, 47, 42, 61, 4, ha_blue);
+    logo_fill_polygon(
+        house_x,
+        house_y,
+        sizeof(house_x) / sizeof(house_x[0]),
+        ha_blue
+    );
 
-    logo_draw_thick_line(32, 18, 32, 46, 2, white);
-    logo_draw_thick_line(32, 30, 18, 38, 2, white);
-    logo_draw_thick_line(32, 30, 46, 38, 2, white);
-    logo_draw_thick_line(32, 44, 24, 53, 2, white);
-    logo_draw_thick_line(32, 44, 40, 53, 2, white);
+    logo_draw_thick_line(32, 17, 32, 63, 3, white);
+    logo_draw_thick_line(32, 49, 48, 34, 3, white);
+    logo_draw_thick_line(32, 57, 16, 46, 3, white);
 
-    logo_fill_circle(32, 18, 4, white);
-    logo_fill_circle(18, 38, 4, white);
-    logo_fill_circle(46, 38, 4, white);
-    logo_fill_circle(24, 53, 4, white);
-    logo_fill_circle(40, 53, 4, white);
+    logo_fill_circle(32, 17, 6, white);
+    logo_fill_circle(48, 34, 6, white);
+    logo_fill_circle(16, 46, 6, white);
 }
 
 /*
