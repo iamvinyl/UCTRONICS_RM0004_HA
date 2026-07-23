@@ -1,7 +1,7 @@
 name: "UCTronics Display"
-description: "UCTronics LCD Display"
-url: "https://github.com/UCTRONICS/UCTRONICS_RM0004_HA/tree/main/uc_tronics_display"
-version: "1.1.5"
+description: "Configurable UCTronics LCD Display"
+url: "https://github.com/iamvinyl/UCTRONICS_RM0004_HA/tree/main/uc_tronics_display"
+version: "1.2.0"
 slug: "uc_tronics_display"
 init: false
 arch:
@@ -17,3 +17,17 @@ devices:
 privileged:
   - "SYS_ADMIN"
 hassio_api: true
+options:
+  show_home_assistant_logo: true
+  show_ip_address: true
+  show_cpu_usage: true
+  show_ram_usage: true
+  show_disk_space: true
+  screen_duration: 5
+schema:
+  show_home_assistant_logo: bool
+  show_ip_address: bool
+  show_cpu_usage: bool
+  show_ram_usage: bool
+  show_disk_space: bool
+  screen_duration: "int(2,60)"
