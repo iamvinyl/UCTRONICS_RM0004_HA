@@ -1,8 +1,9 @@
 /******
- * Configurable display for the UCTRONICS RM0004 160x80 LCD.
+ * Configurable display for the UCTRONICS RM0013 Raspberry Pi 5 rack.
  *
- * Enabled screens are selected by run.sh from the Home Assistant add-on
- * configuration page and passed as command-line flags.
+ * The RM0013 panel is treated as a 128x64 monochrome display. The underlying
+ * UCTRONICS I2C bridge and existing st7735 driver are retained because the
+ * stock RM0013 documentation points to the SKU_RM0004 software.
  ******/
 #include <stdint.h>
 #include <stdio.h>
@@ -11,10 +12,9 @@
 #include <unistd.h>
 
 #include "st7735.h"
-#include "rpiInfo.h"
 
-#define LCD_WIDTH 160
-#define LCD_HEIGHT 80
+#define DISPLAY_WIDTH 128
+#define DISPLAY_HEIGHT 64
 #define MAX_SCREENS 5
 #define DEFAULT_SCREEN_DURATION 5
 #define MIN_SCREEN_DURATION 2
@@ -33,8 +33,34 @@ static screen_type_t enabled_screens[MAX_SCREENS];
 static int enabled_screen_count = 0;
 static unsigned int screen_duration = DEFAULT_SCREEN_DURATION;
 
-/* Canvas used only for the Home Assistant logo. */
-static uint16_t logo_canvas[LCD_WIDTH * LCD_HEIGHT];
+static char host_ip_address[64] = "Unavailable";
+static uint8_t host_disk_usage = 0;
+
+/* Monochrome canvas used to render the Home Assistant logo. */
+static uint8_t logo_canvas[DISPLAY_WIDTH * DISPLAY_HEIGHT];
+
+static void sync_display(void)
+{
+    i2c_write_command(SYNC_REG, 0x00, 0x01);
+}
+
+static void fill_rectangle_synced(
+    uint16_t x,
+    uint16_t y,
+    uint16_t width,
+    uint16_t height,
+    uint16_t color
+)
+{
+    lcd_fill_rectangle(x, y, width, height, color);
+    sync_display();
+}
+
+static void clear_display(void)
+{
+    lcd_fill_screen(ST7735_BLACK);
+    sync_display();
+}
 
 static void add_screen(screen_type_t screen)
 {
@@ -55,29 +81,97 @@ static uint16_t centered_x(const char *text, uint16_t character_width)
 
     pixel_width = strlen(text) * character_width;
 
-    if (pixel_width >= LCD_WIDTH)
+    if (pixel_width >= DISPLAY_WIDTH)
     {
         return 0;
     }
 
-    return (uint16_t)((LCD_WIDTH - pixel_width) / 2);
+    return (uint16_t)((DISPLAY_WIDTH - pixel_width) / 2);
 }
 
-static void draw_title(const char *title, uint16_t color)
+static void draw_title(const char *title)
 {
     lcd_write_string(
-        centered_x(title, Font_8x16.width),
-        2,
+        centered_x(title, Font_7x10.width),
+        1,
         (char *)title,
-        Font_8x16,
-        color,
+        Font_7x10,
+        ST7735_WHITE,
         ST7735_BLACK
     );
 
-    lcd_fill_rectangle(0, 21, LCD_WIDTH, 3, color);
+    fill_rectangle_synced(0, 13, DISPLAY_WIDTH, 2, ST7735_WHITE);
 }
 
-static void draw_percentage_value(uint8_t percentage, uint16_t color)
+static void draw_progress_bar(uint8_t percentage)
+{
+    const uint16_t start_x = 10;
+    const uint16_t start_y = 52;
+    const uint16_t segment_width = 8;
+    const uint16_t segment_height = 8;
+    const uint16_t gap = 3;
+    uint8_t filled_segments;
+    uint8_t index;
+
+    if (percentage > 100)
+    {
+        percentage = 100;
+    }
+
+    filled_segments = percentage == 0
+        ? 0
+        : (uint8_t)((percentage + 9) / 10);
+
+    for (index = 0; index < 10; index++)
+    {
+        uint16_t x = start_x + (index * (segment_width + gap));
+
+        if (index < filled_segments)
+        {
+            fill_rectangle_synced(
+                x,
+                start_y,
+                segment_width,
+                segment_height,
+                ST7735_WHITE
+            );
+        }
+        else
+        {
+            /* Draw an outline for unused segments. */
+            fill_rectangle_synced(
+                x,
+                start_y,
+                segment_width,
+                1,
+                ST7735_WHITE
+            );
+            fill_rectangle_synced(
+                x,
+                start_y + segment_height - 1,
+                segment_width,
+                1,
+                ST7735_WHITE
+            );
+            fill_rectangle_synced(
+                x,
+                start_y,
+                1,
+                segment_height,
+                ST7735_WHITE
+            );
+            fill_rectangle_synced(
+                x + segment_width - 1,
+                start_y,
+                1,
+                segment_height,
+                ST7735_WHITE
+            );
+        }
+    }
+}
+
+static void draw_percentage_value(uint8_t percentage)
 {
     char value[8];
 
@@ -89,33 +183,28 @@ static void draw_percentage_value(uint8_t percentage, uint16_t color)
     snprintf(value, sizeof(value), "%u%%", (unsigned int)percentage);
 
     lcd_write_string(
-        centered_x(value, Font_11x18.width),
-        32,
+        centered_x(value, Font_16x26.width),
+        20,
         value,
-        Font_11x18,
+        Font_16x26,
         ST7735_WHITE,
         ST7735_BLACK
     );
 
-    lcd_display_percentage(percentage, color);
+    draw_progress_bar(percentage);
 }
 
-static void logo_set_pixel(int x, int y, uint16_t color)
+static void logo_set_pixel(int x, int y)
 {
-    if (x < 0 || x >= LCD_WIDTH || y < 0 || y >= LCD_HEIGHT)
+    if (x < 0 || x >= DISPLAY_WIDTH || y < 0 || y >= DISPLAY_HEIGHT)
     {
         return;
     }
 
-    logo_canvas[(y * LCD_WIDTH) + x] = color;
+    logo_canvas[(y * DISPLAY_WIDTH) + x] = 1;
 }
 
-static void logo_fill_circle(
-    int center_x,
-    int center_y,
-    int radius,
-    uint16_t color
-)
+static void logo_fill_circle(int center_x, int center_y, int radius)
 {
     int x;
     int y;
@@ -126,7 +215,7 @@ static void logo_fill_circle(
         {
             if ((x * x) + (y * y) <= (radius * radius))
             {
-                logo_set_pixel(center_x + x, center_y + y, color);
+                logo_set_pixel(center_x + x, center_y + y);
             }
         }
     }
@@ -137,8 +226,7 @@ static void logo_draw_thick_line(
     int y0,
     int x1,
     int y1,
-    int radius,
-    uint16_t color
+    int radius
 )
 {
     int dx = abs(x1 - x0);
@@ -149,7 +237,7 @@ static void logo_draw_thick_line(
 
     while (1)
     {
-        logo_fill_circle(x0, y0, radius, color);
+        logo_fill_circle(x0, y0, radius);
 
         if (x0 == x1 && y0 == y1)
         {
@@ -172,177 +260,301 @@ static void logo_draw_thick_line(
 
 static void build_home_assistant_logo(void)
 {
-    const uint16_t blue = ST7735_COLOR565(24, 188, 242);
-    const uint16_t white = ST7735_WHITE;
-    int index;
+    memset(logo_canvas, 0, sizeof(logo_canvas));
 
-    for (index = 0; index < LCD_WIDTH * LCD_HEIGHT; index++)
-    {
-        logo_canvas[index] = ST7735_BLACK;
-    }
+    /*
+     * White-only Home Assistant mark for the RM0013 monochrome panel.
+     * The mark is centered inside the 128x64 visible area.
+     */
+    logo_draw_thick_line(40, 29, 64, 5, 3);
+    logo_draw_thick_line(64, 5, 88, 29, 3);
+    logo_draw_thick_line(40, 29, 40, 45, 3);
+    logo_draw_thick_line(88, 29, 88, 45, 3);
+    logo_draw_thick_line(40, 45, 55, 59, 3);
+    logo_draw_thick_line(88, 45, 73, 59, 3);
 
-    /* Centered Home Assistant house outline. */
-    logo_draw_thick_line(51, 36, 80, 7, 4, blue);
-    logo_draw_thick_line(80, 7, 109, 36, 4, blue);
-    logo_draw_thick_line(51, 36, 51, 59, 4, blue);
-    logo_draw_thick_line(109, 36, 109, 59, 4, blue);
-    logo_draw_thick_line(51, 59, 70, 72, 4, blue);
-    logo_draw_thick_line(109, 59, 90, 72, 4, blue);
+    /* Connected nodes inside the house. */
+    logo_draw_thick_line(64, 20, 64, 45, 1);
+    logo_draw_thick_line(64, 30, 52, 38, 1);
+    logo_draw_thick_line(64, 30, 76, 38, 1);
+    logo_draw_thick_line(64, 43, 57, 51, 1);
+    logo_draw_thick_line(64, 43, 71, 51, 1);
 
-    /* Connected smart-home nodes inside the house. */
-    logo_draw_thick_line(80, 26, 80, 56, 2, white);
-    logo_draw_thick_line(80, 38, 65, 46, 2, white);
-    logo_draw_thick_line(80, 38, 95, 46, 2, white);
-    logo_draw_thick_line(80, 52, 71, 62, 2, white);
-    logo_draw_thick_line(80, 52, 89, 62, 2, white);
-
-    logo_fill_circle(80, 26, 4, white);
-    logo_fill_circle(65, 46, 4, white);
-    logo_fill_circle(95, 46, 4, white);
-    logo_fill_circle(71, 62, 4, white);
-    logo_fill_circle(89, 62, 4, white);
+    logo_fill_circle(64, 20, 3);
+    logo_fill_circle(52, 38, 3);
+    logo_fill_circle(76, 38, 3);
+    logo_fill_circle(57, 51, 3);
+    logo_fill_circle(71, 51, 3);
 }
 
 static void render_home_assistant_logo(void)
 {
     int y;
 
-    lcd_fill_screen(ST7735_BLACK);
+    clear_display();
     build_home_assistant_logo();
 
     /*
-     * Draw short horizontal runs through lcd_fill_rectangle(). This uses the
-     * same reliable I2C drawing path as the original UCTRONICS metric pages.
+     * Render each white run as a short rectangle and explicitly synchronize
+     * after each run. The missing synchronization was the reason the prior
+     * custom logo could leave the screen black.
      */
-    for (y = 0; y < LCD_HEIGHT; y++)
+    for (y = 0; y < DISPLAY_HEIGHT; y++)
     {
         int x = 0;
 
-        while (x < LCD_WIDTH)
+        while (x < DISPLAY_WIDTH)
         {
-            uint16_t color = logo_canvas[(y * LCD_WIDTH) + x];
-            int start = x;
+            int start;
 
             while (
-                x < LCD_WIDTH &&
-                logo_canvas[(y * LCD_WIDTH) + x] == color
+                x < DISPLAY_WIDTH &&
+                logo_canvas[(y * DISPLAY_WIDTH) + x] == 0
             )
             {
                 x++;
             }
 
-            if (color != ST7735_BLACK)
+            start = x;
+
+            while (
+                x < DISPLAY_WIDTH &&
+                logo_canvas[(y * DISPLAY_WIDTH) + x] != 0
+            )
             {
-                lcd_fill_rectangle(
+                x++;
+            }
+
+            if (x > start)
+            {
+                fill_rectangle_synced(
                     (uint16_t)start,
                     (uint16_t)y,
                     (uint16_t)(x - start),
                     1,
-                    color
+                    ST7735_WHITE
                 );
             }
         }
     }
+
+    sync_display();
 }
 
 static void render_ip_address(void)
 {
-    char *ip_address = get_ip_address();
-
-    lcd_fill_screen(ST7735_BLACK);
-    draw_title("IP ADDRESS", ST7735_CYAN);
-
-    if (
-        ip_address == NULL ||
-        ip_address[0] == '\0'
-    )
-    {
-        ip_address = "Unavailable";
-    }
+    clear_display();
+    draw_title("HOST IP");
 
     lcd_write_string(
-        centered_x(ip_address, Font_8x16.width),
-        37,
-        ip_address,
+        centered_x(host_ip_address, Font_8x16.width),
+        27,
+        host_ip_address,
         Font_8x16,
         ST7735_WHITE,
         ST7735_BLACK
     );
+
+    sync_display();
+}
+
+static int read_cpu_snapshot(
+    unsigned long long *total,
+    unsigned long long *idle_total
+)
+{
+    FILE *file;
+    char line[256];
+    unsigned long long user = 0;
+    unsigned long long nice = 0;
+    unsigned long long system = 0;
+    unsigned long long idle = 0;
+    unsigned long long iowait = 0;
+    unsigned long long irq = 0;
+    unsigned long long softirq = 0;
+    unsigned long long steal = 0;
+    unsigned long long guest = 0;
+    unsigned long long guest_nice = 0;
+    int values_read;
+
+    file = fopen("/proc/stat", "r");
+
+    if (file == NULL)
+    {
+        return 0;
+    }
+
+    if (fgets(line, sizeof(line), file) == NULL)
+    {
+        fclose(file);
+        return 0;
+    }
+
+    fclose(file);
+
+    values_read = sscanf(
+        line,
+        "cpu %llu %llu %llu %llu %llu %llu %llu %llu %llu %llu",
+        &user,
+        &nice,
+        &system,
+        &idle,
+        &iowait,
+        &irq,
+        &softirq,
+        &steal,
+        &guest,
+        &guest_nice
+    );
+
+    if (values_read < 4)
+    {
+        return 0;
+    }
+
+    /*
+     * guest and guest_nice are already included in user and nice, so they are
+     * not added separately.
+     */
+    *idle_total = idle + iowait;
+    *total = user + nice + system + idle + iowait + irq + softirq + steal;
+
+    return 1;
+}
+
+static uint8_t read_cpu_usage(void)
+{
+    unsigned long long first_total;
+    unsigned long long first_idle;
+    unsigned long long second_total;
+    unsigned long long second_idle;
+    unsigned long long total_delta;
+    unsigned long long idle_delta;
+    unsigned long long busy_delta;
+    unsigned int percentage;
+
+    if (!read_cpu_snapshot(&first_total, &first_idle))
+    {
+        return 0;
+    }
+
+    usleep(250000);
+
+    if (!read_cpu_snapshot(&second_total, &second_idle))
+    {
+        return 0;
+    }
+
+    total_delta = second_total - first_total;
+    idle_delta = second_idle - first_idle;
+
+    if (total_delta == 0 || idle_delta > total_delta)
+    {
+        return 0;
+    }
+
+    busy_delta = total_delta - idle_delta;
+    percentage = (unsigned int)((busy_delta * 100U) / total_delta);
+
+    if (percentage > 100U)
+    {
+        percentage = 100U;
+    }
+
+    return (uint8_t)percentage;
+}
+
+static uint8_t read_ram_usage(void)
+{
+    FILE *file;
+    char line[256];
+    unsigned long long memory_total = 0;
+    unsigned long long memory_available = 0;
+    unsigned long long memory_free = 0;
+    unsigned long long available;
+    unsigned long long used;
+    unsigned int percentage;
+
+    file = fopen("/proc/meminfo", "r");
+
+    if (file == NULL)
+    {
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), file) != NULL)
+    {
+        if (
+            sscanf(line, "MemTotal: %llu kB", &memory_total) == 1
+        )
+        {
+            continue;
+        }
+
+        if (
+            sscanf(line, "MemAvailable: %llu kB", &memory_available) == 1
+        )
+        {
+            continue;
+        }
+
+        if (
+            sscanf(line, "MemFree: %llu kB", &memory_free) == 1
+        )
+        {
+            continue;
+        }
+    }
+
+    fclose(file);
+
+    if (memory_total == 0)
+    {
+        return 0;
+    }
+
+    available = memory_available > 0
+        ? memory_available
+        : memory_free;
+
+    if (available > memory_total)
+    {
+        available = memory_total;
+    }
+
+    used = memory_total - available;
+    percentage = (unsigned int)((used * 100U) / memory_total);
+
+    if (percentage > 100U)
+    {
+        percentage = 100U;
+    }
+
+    return (uint8_t)percentage;
 }
 
 static void render_cpu_usage(void)
 {
-    uint8_t cpu_usage = get_cpu_message();
-
-    if (cpu_usage > 100)
-    {
-        cpu_usage = 100;
-    }
-
-    lcd_fill_screen(ST7735_BLACK);
-    draw_title("CPU USAGE", ST7735_GREEN);
-    draw_percentage_value(cpu_usage, ST7735_GREEN);
+    clear_display();
+    draw_title("CPU USAGE");
+    draw_percentage_value(read_cpu_usage());
+    sync_display();
 }
 
 static void render_ram_usage(void)
 {
-    float total_ram = 0.0f;
-    float free_ram = 0.0f;
-    float used_percentage = 0.0f;
-    uint8_t ram_usage = 0;
-
-    get_cpu_memory(&total_ram, &free_ram);
-
-    if (total_ram > 0.0f)
-    {
-        used_percentage = ((total_ram - free_ram) / total_ram) * 100.0f;
-
-        if (used_percentage < 0.0f)
-        {
-            used_percentage = 0.0f;
-        }
-        else if (used_percentage > 100.0f)
-        {
-            used_percentage = 100.0f;
-        }
-
-        ram_usage = (uint8_t)used_percentage;
-    }
-
-    lcd_fill_screen(ST7735_BLACK);
-    draw_title("RAM USAGE", ST7735_YELLOW);
-    draw_percentage_value(ram_usage, ST7735_YELLOW);
+    clear_display();
+    draw_title("RAM USAGE");
+    draw_percentage_value(read_ram_usage());
+    sync_display();
 }
 
 static void render_disk_space(void)
 {
-    uint32_t sd_total = 0;
-    uint32_t sd_used = 0;
-    uint16_t disk_total = 0;
-    uint16_t disk_used = 0;
-    uint64_t total_space;
-    uint64_t used_space;
-    uint8_t disk_usage = 0;
-
-    get_sd_memory(&sd_total, &sd_used);
-    get_hard_disk_memory(&disk_total, &disk_used);
-
-    total_space = (uint64_t)sd_total + (uint64_t)disk_total;
-    used_space = (uint64_t)sd_used + (uint64_t)disk_used;
-
-    if (total_space > 0)
-    {
-        if (used_space > total_space)
-        {
-            used_space = total_space;
-        }
-
-        disk_usage = (uint8_t)((used_space * 100U) / total_space);
-    }
-
-    lcd_fill_screen(ST7735_BLACK);
-    draw_title("DISK SPACE", ST7735_BLUE);
-    draw_percentage_value(disk_usage, ST7735_BLUE);
+    clear_display();
+    draw_title("DISK SPACE");
+    draw_percentage_value(host_disk_usage);
+    sync_display();
 }
 
 static const char *screen_name(screen_type_t screen)
@@ -352,13 +564,13 @@ static const char *screen_name(screen_type_t screen)
         case SCREEN_HOME_ASSISTANT_LOGO:
             return "Home Assistant logo";
         case SCREEN_IP_ADDRESS:
-            return "IP address";
+            return "host IP address";
         case SCREEN_CPU_USAGE:
             return "CPU usage";
         case SCREEN_RAM_USAGE:
             return "RAM usage";
         case SCREEN_DISK_SPACE:
-            return "disk space";
+            return "host disk space";
         default:
             return "unknown";
     }
@@ -436,6 +648,36 @@ static void parse_arguments(int argc, char *argv[])
 
             screen_duration = (unsigned int)requested_duration;
         }
+        else if (
+            strcmp(argv[index], "--host-ip") == 0 &&
+            index + 1 < argc
+        )
+        {
+            snprintf(
+                host_ip_address,
+                sizeof(host_ip_address),
+                "%s",
+                argv[++index]
+            );
+        }
+        else if (
+            strcmp(argv[index], "--disk-percent") == 0 &&
+            index + 1 < argc
+        )
+        {
+            long requested_percentage = strtol(argv[++index], NULL, 10);
+
+            if (requested_percentage < 0)
+            {
+                requested_percentage = 0;
+            }
+            else if (requested_percentage > 100)
+            {
+                requested_percentage = 100;
+            }
+
+            host_disk_usage = (uint8_t)requested_percentage;
+        }
     }
 
     if (enabled_screen_count == 0)
@@ -467,6 +709,8 @@ int main(int argc, char *argv[])
         enabled_screen_count,
         screen_duration
     );
+    printf("Supervisor host IP: %s\n", host_ip_address);
+    printf("Supervisor host disk usage: %u%%\n", host_disk_usage);
     fflush(stdout);
 
     while (1)
@@ -484,4 +728,3 @@ int main(int argc, char *argv[])
 
     return 0;
 }
-
