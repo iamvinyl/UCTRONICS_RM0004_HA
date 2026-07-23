@@ -1,6 +1,6 @@
 #!/usr/bin/with-contenv bashio
 
-bashio::log.info "Starting UCTRONICS RM0013 128x64 display"
+bashio::log.info "Starting UCTRONICS RM0013 160x80 color display v1.2.3"
 
 if [[ ! -e /dev/i2c-1 ]]; then
     bashio::log.fatal "I2C device /dev/i2c-1 was not found."
@@ -48,8 +48,8 @@ if [[ ${#display_args[@]} -eq 0 ]]; then
 fi
 
 #
-# Read the primary host interface from the Supervisor API. This returns the
-# Home Assistant host address instead of the add-on container's 172.30.x.x IP.
+# Read the primary Home Assistant host interface from Supervisor.
+# This avoids showing the add-on container's 172.30.x.x address.
 #
 host_ip_cidr="$(
     bashio::network.ipv4_address default 2>/dev/null |
@@ -60,13 +60,13 @@ host_ip="${host_ip_cidr%%/*}"
 
 if [[ ! "${host_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     bashio::log.warning \
-        "The Supervisor did not return a usable host IPv4 address."
+        "Supervisor did not return a usable host IPv4 address."
     host_ip="Unavailable"
 fi
 
 #
-# Read Home Assistant OS data-disk usage from the Supervisor API. This avoids
-# reporting the add-on container overlay filesystem.
+# Read Home Assistant host disk usage from Supervisor rather than the
+# add-on container overlay filesystem.
 #
 disk_total="$(bashio::host.disk_total 2>/dev/null || true)"
 disk_used="$(bashio::host.disk_used 2>/dev/null || true)"
@@ -93,7 +93,7 @@ then
     )"
 else
     bashio::log.warning \
-        "The Supervisor did not return usable host disk information."
+        "Supervisor did not return usable host disk information."
 fi
 
 bashio::log.info "Enabled display arguments: ${display_args[*]}"
@@ -106,5 +106,3 @@ exec ./display \
     --duration "${screen_duration}" \
     --host-ip "${host_ip}" \
     --disk-percent "${disk_percent}"
-
-exec ./display "${display_args[@]}" --duration "${screen_duration}"
