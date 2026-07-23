@@ -18,10 +18,13 @@
 #define LOGO_HEIGHT 64
 #define LOGO_X ((DISPLAY_WIDTH - LOGO_WIDTH) / 2)
 #define LOGO_Y ((DISPLAY_HEIGHT - LOGO_HEIGHT) / 2)
-#define MAX_SCREENS 5
+#define MAX_SCREENS 6
 #define DEFAULT_SCREEN_DURATION 5
 #define MIN_SCREEN_DURATION 2
 #define MAX_SCREEN_DURATION 60
+#define ENTITY_TEXT_MAX 64
+#define DEFAULT_TRANSITION_STEPS 5
+#define DEFAULT_TRANSITION_DELAY_MS 40
 
 typedef enum
 {
@@ -29,8 +32,16 @@ typedef enum
     SCREEN_IP_ADDRESS,
     SCREEN_CPU_USAGE,
     SCREEN_RAM_USAGE,
-    SCREEN_DISK_SPACE
+    SCREEN_DISK_SPACE,
+    SCREEN_ENTITY_STATE
 } screen_type_t;
+
+typedef enum
+{
+    TRANSITION_NONE,
+    TRANSITION_SLIDE,
+    TRANSITION_FADE
+} transition_type_t;
 
 static screen_type_t enabled_screens[MAX_SCREENS];
 static int enabled_screen_count = 0;
@@ -38,6 +49,13 @@ static unsigned int screen_duration = DEFAULT_SCREEN_DURATION;
 
 static char host_ip_address[64] = "Unavailable";
 static uint8_t host_disk_usage = 0;
+static char entity_state_file[128] = "/tmp/uctronics_entity_state";
+static char entity_label[ENTITY_TEXT_MAX] = "ENTITY";
+static char entity_value[ENTITY_TEXT_MAX] = "Unavailable";
+static char entity_unit[ENTITY_TEXT_MAX] = "";
+static transition_type_t transition_type = TRANSITION_SLIDE;
+static unsigned int transition_steps = DEFAULT_TRANSITION_STEPS;
+static unsigned int transition_delay_ms = DEFAULT_TRANSITION_DELAY_MS;
 
 /* RGB565 byte buffer used for one exact 64x64 logo transfer. */
 static uint8_t logo_image[LOGO_WIDTH * LOGO_HEIGHT * 2];
@@ -674,6 +692,97 @@ static void render_disk_space(void)
     sync_display();
 }
 
+static void trim_line(char *text)
+{
+    size_t length = strlen(text);
+    while (length > 0 && (text[length - 1] == '\n' || text[length - 1] == '\r'))
+    {
+        text[--length] = '\0';
+    }
+}
+
+static void read_entity_state_file(void)
+{
+    FILE *file = fopen(entity_state_file, "r");
+    if (file == NULL)
+    {
+        snprintf(entity_label, sizeof(entity_label), "%s", "ENTITY");
+        snprintf(entity_value, sizeof(entity_value), "%s", "Unavailable");
+        entity_unit[0] = '\0';
+        return;
+    }
+
+    if (fgets(entity_label, sizeof(entity_label), file) == NULL)
+        snprintf(entity_label, sizeof(entity_label), "%s", "ENTITY");
+    if (fgets(entity_value, sizeof(entity_value), file) == NULL)
+        snprintf(entity_value, sizeof(entity_value), "%s", "Unavailable");
+    if (fgets(entity_unit, sizeof(entity_unit), file) == NULL)
+        entity_unit[0] = '\0';
+    fclose(file);
+    trim_line(entity_label); trim_line(entity_value); trim_line(entity_unit);
+}
+
+static void fit_text(char *destination, size_t destination_size, const char *source, size_t maximum_characters)
+{
+    size_t length = strlen(source);
+    if (length <= maximum_characters)
+        snprintf(destination, destination_size, "%s", source);
+    else if (maximum_characters > 3)
+    {
+        snprintf(destination, destination_size, "%.*s...", (int)(maximum_characters - 3), source);
+    }
+    else
+        snprintf(destination, destination_size, "%.*s", (int)maximum_characters, source);
+}
+
+static void render_entity_state(void)
+{
+    const uint16_t accent = ST7735_CYAN;
+    char title[21];
+    char combined[80];
+    char value[20];
+
+    read_entity_state_file();
+    fit_text(title, sizeof(title), entity_label, 20);
+    if (entity_unit[0] != '\0')
+        snprintf(combined, sizeof(combined), "%s %s", entity_value, entity_unit);
+    else
+        snprintf(combined, sizeof(combined), "%s", entity_value);
+    fit_text(value, sizeof(value), combined, 14);
+
+    clear_display(ST7735_BLACK);
+    draw_title(title, accent);
+    lcd_write_string(centered_x(value, Font_11x18.width), 38, value, Font_11x18, ST7735_WHITE, ST7735_BLACK);
+    sync_display();
+}
+
+static void draw_fade_mask(unsigned int visible_level, unsigned int levels)
+{
+    unsigned int x, y;
+    if (levels == 0 || visible_level >= levels) return;
+    for (y = 0; y < DISPLAY_HEIGHT; y += 4)
+    {
+        for (x = 0; x < DISPLAY_WIDTH; x += 4)
+        {
+            unsigned int pattern = ((x / 4) + (y / 4) * 3) % levels;
+            if (pattern >= visible_level)
+                lcd_fill_rectangle((uint16_t)x, (uint16_t)y, 4, 4, ST7735_BLACK);
+        }
+    }
+    sync_display();
+}
+
+static void fade_out(void)
+{
+    unsigned int step;
+    for (step = transition_steps; step > 0; step--)
+    {
+        draw_fade_mask(step - 1, transition_steps);
+        usleep(transition_delay_ms * 1000U);
+    }
+    clear_display(ST7735_BLACK);
+}
+
 static const char *screen_name(screen_type_t screen)
 {
     switch (screen)
@@ -688,6 +797,8 @@ static const char *screen_name(screen_type_t screen)
             return "RAM usage";
         case SCREEN_DISK_SPACE:
             return "host disk space";
+        case SCREEN_ENTITY_STATE:
+            return "entity state";
         default:
             return "unknown";
     }
@@ -715,9 +826,35 @@ static void render_screen(screen_type_t screen)
         case SCREEN_DISK_SPACE:
             render_disk_space();
             break;
+        case SCREEN_ENTITY_STATE:
+            render_entity_state();
+            break;
         default:
             render_home_assistant_logo();
             break;
+    }
+}
+
+static void render_with_transition(screen_type_t screen, int is_first_screen)
+{
+    unsigned int step;
+
+    if (!is_first_screen && transition_type == TRANSITION_FADE)
+        fade_out();
+
+    if (transition_type == TRANSITION_FADE)
+    {
+        for (step = 1; step <= transition_steps; step++)
+        {
+            render_screen(screen);
+            draw_fade_mask(step, transition_steps);
+            usleep(transition_delay_ms * 1000U);
+        }
+    }
+    else
+    {
+        /* The controller's normal full-frame transfer produces the slide reveal. */
+        render_screen(screen);
     }
 }
 
@@ -746,6 +883,35 @@ static void parse_arguments(int argc, char *argv[])
         else if (strcmp(argv[index], "--disk") == 0)
         {
             add_screen(SCREEN_DISK_SPACE);
+        }
+        else if (strcmp(argv[index], "--entity") == 0)
+        {
+            add_screen(SCREEN_ENTITY_STATE);
+        }
+        else if (strcmp(argv[index], "--entity-file") == 0 && index + 1 < argc)
+        {
+            snprintf(entity_state_file, sizeof(entity_state_file), "%s", argv[++index]);
+        }
+        else if (strcmp(argv[index], "--transition") == 0 && index + 1 < argc)
+        {
+            const char *requested = argv[++index];
+            if (strcmp(requested, "none") == 0) transition_type = TRANSITION_NONE;
+            else if (strcmp(requested, "fade") == 0) transition_type = TRANSITION_FADE;
+            else transition_type = TRANSITION_SLIDE;
+        }
+        else if (strcmp(argv[index], "--transition-steps") == 0 && index + 1 < argc)
+        {
+            long value = strtol(argv[++index], NULL, 10);
+            if (value < 2) value = 2;
+            if (value > 8) value = 8;
+            transition_steps = (unsigned int)value;
+        }
+        else if (strcmp(argv[index], "--transition-delay-ms") == 0 && index + 1 < argc)
+        {
+            long value = strtol(argv[++index], NULL, 10);
+            if (value < 20) value = 20;
+            if (value > 500) value = 500;
+            transition_delay_ms = (unsigned int)value;
         }
         else if (
             strcmp(argv[index], "--duration") == 0 &&
@@ -810,6 +976,7 @@ static void parse_arguments(int argc, char *argv[])
 int main(int argc, char *argv[])
 {
     int current_screen = 0;
+    int is_first_screen = 1;
 
     parse_arguments(argc, argv);
 
@@ -832,7 +999,8 @@ int main(int argc, char *argv[])
 
     while (1)
     {
-        render_screen(enabled_screens[current_screen]);
+        render_with_transition(enabled_screens[current_screen], is_first_screen);
+        is_first_screen = 0;
         sleep(screen_duration);
 
         current_screen++;
