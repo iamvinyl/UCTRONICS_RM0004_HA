@@ -1,19 +1,43 @@
 configuration:
   show_home_assistant_logo:
     name: Home Assistant logo
-    description: Show the blue-and-white Home Assistant logo on the full-color LCD.
+    description: Show the Home Assistant logo on the full-color LCD.
   show_ip_address:
     name: Host IP address
     description: Show the primary Home Assistant host IPv4 address reported by Supervisor.
   show_cpu_usage:
     name: CPU usage
-    description: Show current CPU usage with a green progress bar.
+    description: Show current CPU usage with a progress bar.
   show_ram_usage:
     name: RAM usage
-    description: Show current RAM usage with a yellow progress bar.
+    description: Show current RAM usage with a progress bar.
   show_disk_space:
     name: Host disk space
-    description: Show Home Assistant host disk usage with a blue progress bar.
+    description: Show Home Assistant host disk usage with a progress bar.
+  show_entity_state:
+    name: Entity state
+    description: Add one Home Assistant entity or entity attribute to the screen rotation.
+  entity_id:
+    name: Entity ID
+    description: Home Assistant entity ID, for example sensor.laundry_time_remaining.
+  entity_label:
+    name: Entity label
+    description: Optional title shown above the value. Leave blank to use the friendly name.
+  entity_attribute:
+    name: Entity attribute
+    description: Optional attribute to display instead of the entity state.
+  entity_refresh_interval:
+    name: Entity refresh interval
+    description: Seconds between Home Assistant state updates.
   screen_duration:
     name: Screen duration
     description: Number of seconds each enabled screen remains visible.
+  transition_type:
+    name: Transition
+    description: Choose no software transition, the normal slide reveal, or a fade-style dissolve.
+  transition_steps:
+    name: Fade steps
+    description: Number of stages used by the fade transition.
+  transition_delay_ms:
+    name: Transition delay
+    description: Delay in milliseconds between fade stages.
