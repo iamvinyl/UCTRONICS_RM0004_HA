@@ -1,6 +1,6 @@
 #!/usr/bin/with-contenv bashio
 
-bashio::log.info "Starting UCTRONICS RM0004 display"
+bashio::log.info "Starting UCTRONICS RM0013 128x64 display"
 
 if [[ ! -e /dev/i2c-1 ]]; then
     bashio::log.fatal "I2C device /dev/i2c-1 was not found."
@@ -11,7 +11,11 @@ cd /lcd_display/ || exit 1
 
 bashio::log.info "Building the LCD display program"
 make clean
-make
+
+if ! make; then
+    bashio::log.fatal "The LCD display program failed to compile."
+    exit 1
+fi
 
 display_args=()
 
@@ -43,7 +47,64 @@ if [[ ${#display_args[@]} -eq 0 ]]; then
     display_args+=("--logo")
 fi
 
+#
+# Read the primary host interface from the Supervisor API. This returns the
+# Home Assistant host address instead of the add-on container's 172.30.x.x IP.
+#
+host_ip_cidr="$(
+    bashio::network.ipv4_address default 2>/dev/null |
+    head -n 1 ||
+    true
+)"
+host_ip="${host_ip_cidr%%/*}"
+
+if [[ ! "${host_ip}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    bashio::log.warning \
+        "The Supervisor did not return a usable host IPv4 address."
+    host_ip="Unavailable"
+fi
+
+#
+# Read Home Assistant OS data-disk usage from the Supervisor API. This avoids
+# reporting the add-on container overlay filesystem.
+#
+disk_total="$(bashio::host.disk_total 2>/dev/null || true)"
+disk_used="$(bashio::host.disk_used 2>/dev/null || true)"
+disk_percent=0
+
+if \
+    [[ "${disk_total}" =~ ^[0-9]+([.][0-9]+)?$ ]] &&
+    [[ "${disk_used}" =~ ^[0-9]+([.][0-9]+)?$ ]]
+then
+    disk_percent="$(
+        awk \
+            -v used="${disk_used}" \
+            -v total="${disk_total}" \
+            'BEGIN {
+                if (total > 0) {
+                    value = (used / total) * 100;
+                    if (value < 0) value = 0;
+                    if (value > 100) value = 100;
+                    printf "%.0f", value;
+                } else {
+                    print 0;
+                }
+            }'
+    )"
+else
+    bashio::log.warning \
+        "The Supervisor did not return usable host disk information."
+fi
+
 bashio::log.info "Enabled display arguments: ${display_args[*]}"
 bashio::log.info "Screen duration: ${screen_duration} seconds"
+bashio::log.info "Home Assistant host IP: ${host_ip}"
+bashio::log.info "Home Assistant host disk usage: ${disk_percent}%"
+
+exec ./display \
+    "${display_args[@]}" \
+    --duration "${screen_duration}" \
+    --host-ip "${host_ip}" \
+    --disk-percent "${disk_percent}"
 
 exec ./display "${display_args[@]}" --duration "${screen_duration}"
